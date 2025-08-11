@@ -1,27 +1,56 @@
 #!/bin/bash
 
+set -e
+set -u
+
 echo "=== NUT Linux Server Auto Setup + WinNUT Config Generator ==="
 echo
 
-# 1. Detect UPS with nut-scanner
-echo "Running nut-scanner -U to find UPS..."
-SCAN_RESULT=$(sudo nut-scanner -U 2>/dev/null)
+#--- Functions ---#
 
-get_value() {
-    echo "$SCAN_RESULT" | grep "^$1 =" | head -n1 | awk -F '"' '{print $2}'
+# Print error and exit
+die() { echo "Error: $*" >&2; exit 1; }
+
+# Prompt for value with default
+prompt() {
+    local var="$1" prompt="$2" default="$3"
+    read -r -p "$prompt (default: $default): " input
+    export "$var"="${input:-$default}"
 }
-driver=$(get_value driver)
-port=$(get_value port)
-vendorid=$(get_value vendorid)
-productid=$(get_value productid)
-desc=$(get_value desc)
 
-# Set defaults if detection fails
-driver=${driver:-nutdrv_qx}
-port=${port:-auto}
-vendorid=${vendorid:-0665}
-productid=${productid:-5161}
-desc=${desc:-"My UPS"}
+# Prompt for password securely
+prompt_pass() {
+    local var="$1" prompt="$2"
+    read -r -s -p "$prompt: " input
+    echo
+    export "$var"="$input"
+}
+
+# Detect UPS with nut-scanner
+detect_ups() {
+    echo "Running nut-scanner -U to find UPS..."
+    local scan
+    scan=$(sudo nut-scanner -U 2>/dev/null || true)
+    get_value() { echo "$scan" | grep "^$1 =" | head -n1 | awk -F '"' '{print $2}'; }
+    
+    DETECTED_DRIVER=$(get_value driver)
+    DETECTED_PORT=$(get_value port)
+    DETECTED_VENDORID=$(get_value vendorid)
+    DETECTED_PRODUCTID=$(get_value productid)
+    DETECTED_DESC=$(get_value desc)
+    
+    export DETECTED_DRIVER DETECTED_PORT DETECTED_VENDORID DETECTED_PRODUCTID DETECTED_DESC
+}
+
+#--- Main ---#
+
+detect_ups
+
+driver="${DETECTED_DRIVER:-nutdrv_qx}"
+port="${DETECTED_PORT:-auto}"
+vendorid="${DETECTED_VENDORID:-0665}"
+productid="${DETECTED_PRODUCTID:-5161}"
+desc="${DETECTED_DESC:-My UPS}"
 
 echo "Detected:"
 echo " Driver: $driver"
@@ -31,34 +60,33 @@ echo " Product ID: $productid"
 echo " Description: $desc"
 echo
 
-read -p "Enter UPS name (default: myups): " ups_name
-ups_name=${ups_name:-myups}
+prompt ups_name "Enter UPS name" "myups"
+prompt driver "Enter UPS driver" "$driver"
+prompt port "Enter UPS port" "$port"
+prompt vendorid "Enter vendorid" "$vendorid"
+prompt productid "Enter productid" "$productid"
+prompt desc "Enter UPS description" "$desc"
+prompt_pass admin_password "Enter NUT admin password"
+prompt_pass slave_password "Enter NUT slave password"
+prompt finaldelay "Enter FINALDELAY in seconds" "180"
 
-read -p "Enter UPS driver (default: $driver): " driver_input
-driver=${driver_input:-$driver}
-
-read -p "Enter UPS port (default: $port): " port_input
-port=${port_input:-$port}
-
-read -p "Enter vendorid (default: $vendorid): " vendorid_input
-vendorid=${vendorid_input:-$vendorid}
-
-read -p "Enter productid (default: $productid): " productid_input
-productid=${productid_input:-$productid}
-
-read -p "Enter UPS description (default: \"$desc\"): " desc_input
-desc=${desc_input:-$desc}
-
-read -s -p "Enter NUT admin password: " admin_password
+#--- Confirm ---
 echo
-read -s -p "Enter NUT slave password: " slave_password
+echo "======= CONFIGURATION SUMMARY ======="
+echo "UPS Name: $ups_name"
+echo "Driver: $driver"
+echo "Port: $port"
+echo "Vendor ID: $vendorid"
+echo "Product ID: $productid"
+echo "Description: $desc"
+echo "FINALDELAY: $finaldelay"
 echo
 
-read -p "Enter FINALDELAY in seconds (default: 180): " finaldelay
-finaldelay=${finaldelay:-180}
+read -r -p "Proceed with configuration? (y/N): " confirm
+[[ "$confirm" =~ ^[Yy]$ ]] || die "Aborted."
 
-# Create config files
-echo "Creating /etc/nut/ups.conf"
+#--- Create NUT config files ---#
+
 sudo tee /etc/nut/ups.conf > /dev/null <<EOF
 [$ups_name]
   driver = $driver
@@ -68,12 +96,10 @@ sudo tee /etc/nut/ups.conf > /dev/null <<EOF
   desc = "$desc"
 EOF
 
-echo "Creating /etc/nut/upsd.conf"
 sudo tee /etc/nut/upsd.conf > /dev/null <<EOF
 LISTEN 0.0.0.0 3493
 EOF
 
-echo "Creating /etc/nut/upsd.users"
 sudo tee /etc/nut/upsd.users > /dev/null <<EOF
 [admin]
   password = $admin_password
@@ -86,7 +112,6 @@ sudo tee /etc/nut/upsd.users > /dev/null <<EOF
   upsmon slave
 EOF
 
-echo "Creating /etc/nut/upsmon.conf"
 sudo tee /etc/nut/upsmon.conf > /dev/null <<EOF
 MONITOR $ups_name@localhost 1 admin $admin_password primary
 FINALDELAY $finaldelay
